@@ -1,0 +1,8 @@
+Flask==3.1.0
+xmltodict==0.13.0
+requests==2.32.3
+pytest==8.3.3
+PyJWT==2.9.0
+Flask-Bcrypt==1.0.1
+# Use mysql-connector-python on Windows (pure Python connector)
+mysql-connector-python==8.1.0

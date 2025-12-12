@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<library>
+    <book>
+        <book_id>1</book_id>
+        <title>The Great Gatsby</title>
+        <author_id>3</author_id>
+        <genre>Fiction</genre>
+        <publish_year>1925</publish_year>
+        <isbn>9780743273565</isbn>
+        <available_copies>5</available_copies>
+    </book>
+
+    <book>
+        <book_id>2</book_id>
+        <title>1984</title>
+        <author_id>5</author_id>
+        <genre>Dystopian</genre>
+        <publish_year>1949</publish_year>
+        <isbn>9780451524935</isbn>
+        <available_copies>3</available_copies>
+    </book>
+
+    <book>
+        <book_id>3</book_id>
+        <title>To Kill a Mockingbird</title>
+        <author_id>7</author_id>
+        <genre>Classic</genre>
+        <publish_year>1960</publish_year>
+        <isbn>9780061120084</isbn>
+        <available_copies>7</available_copies>
+    </book>
+</library>
