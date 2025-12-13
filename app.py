@@ -136,36 +136,62 @@ def respond(data):
 # ----------------------------------
 # AUTH ROUTES
 # ----------------------------------
-@app.route("/register", methods=["POST"])
+@app.route("/register", methods=["GET", "POST"])
 def register():
-    data = request.json
-    if not data.get("username") or not data.get("password"):
-        return jsonify({"error": "Username and password required"}), 400
+    if request.method == "GET":
+        return """
+        <h1>Register</h1>
+        <form method="POST">
+            <input name="username" placeholder="Username" required><br><br>
+            <input name="password" type="password" placeholder="Password" required><br><br>
+            <button type="submit">Register</button>
+        </form>
+        """
 
-    cursor.execute("SELECT * FROM users WHERE username=%s", (data["username"],))
+    # POST
+    data = request.form
+    username = data.get("username")
+    password = data.get("password")
+
+    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
     if cursor.fetchone():
-        return jsonify({"error": "User exists"}), 409
+        return "User already exists"
 
-    pw = bcrypt.generate_password_hash(data["password"]).decode()
-    cursor.execute("INSERT INTO users (username, password) VALUES (%s,%s)", (data["username"], pw))
+    pw_hash = bcrypt.generate_password_hash(password).decode("utf-8")
+    cursor.execute(
+        "INSERT INTO users (username, password) VALUES (%s, %s)",
+        (username, pw_hash)
+    )
     db.commit()
-    return jsonify({"message": "User registered"}), 201
 
-@app.route("/login", methods=["POST"])
+    return "<h3>Registration successful</h3><a href='/login'>Login</a>"
+
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
-    data = request.json
-    cursor.execute("SELECT * FROM users WHERE username=%s", (data["username"],))
+    if request.method == "GET":
+        return """
+        <h1>Login</h1>
+        <form method="POST">
+            <input name="username" placeholder="Username" required><br><br>
+            <input name="password" type="password" placeholder="Password" required><br><br>
+            <button type="submit">Login</button>
+        </form>
+        """
+
+    # POST
+    data = request.form
+    username = data.get("username")
+    password = data.get("password")
+
+    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
     user = cursor.fetchone()
 
-    if not user or not bcrypt.check_password_hash(user["password"], data["password"]):
-        return jsonify({"error": "Invalid credentials"}), 401
+    if not user or not bcrypt.check_password_hash(user["password"], password):
+        return "Invalid credentials"
 
-    token = jwt.encode({
-        "user": user["username"],
-        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
-    }, app.config["SECRET_KEY"], algorithm="HS256")
+    return "<h3>Login successful</h3><a href='/books'>View Books</a>"
 
-    return jsonify({"token": token})
 
 # ----------------------------------
 # PUBLIC BOOK VIEW (NO TOKEN)
