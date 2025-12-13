@@ -87,18 +87,37 @@ def seed_books():
         return  # already seeded
 
     books = [
-        ("The Great Gatsby", "F. Scott Fitzgerald", "Fiction", 1925, "9780743273565", 5),
-        ("1984", "George Orwell", "Dystopian", 1949, "9780451524935", 3),
-        ("To Kill a Mockingbird", "Harper Lee", "Classic", 1960, "9780061120084", 7),
-        ("Harry Potter and the Sorcerer's Stone", "J.K. Rowling", "Fantasy", 1997, "9780590353427", 10),
-        ("The Hobbit", "J.R.R. Tolkien", "Fantasy", 1937, "9780547928227", 4),
-    ]
+    ("The Great Gatsby", "F. Scott Fitzgerald", "Fiction", 1925, "9780743273565", 5),
+    ("1984", "George Orwell", "Dystopian", 1949, "9780451524935", 3),
+    ("To Kill a Mockingbird", "Harper Lee", "Classic", 1960, "9780061120084", 7),
+    ("Harry Potter and the Sorcerer's Stone", "J.K. Rowling", "Fantasy", 1997, "9780590353427", 10),
+    ("The Hobbit", "J.R.R. Tolkien", "Fantasy", 1937, "9780547928227", 4),
+    ("Pride and Prejudice", "Jane Austen", "Romance", 1813, "9780141439518", 6),
+    ("Moby Dick", "Herman Melville", "Adventure", 1851, "9781503280786", 2),
+    ("The Catcher in the Rye", "J.D. Salinger", "Fiction", 1951, "9780316769488", 5),
+    ("Brave New World", "Aldous Huxley", "Sci-Fi", 1932, "9780060850524", 3),
+    ("The Lord of the Rings", "J.R.R. Tolkien", "Fantasy", 1954, "9780618640157", 8),
+    ("The Alchemist", "Paulo Coelho", "Fiction", 1988, "9780061122415", 4),
+    ("The Da Vinci Code", "Dan Brown", "Mystery", 2003, "9780307474278", 9),
+    ("The Picture of Dorian Gray", "Oscar Wilde", "Classic", 1890, "9780141442464", 5),
+    ("The Shining", "Stephen King", "Horror", 1977, "9780307743657", 3),
+    ("The Hunger Games", "Suzanne Collins", "Sci-Fi", 2008, "9780439023481", 7),
+    ("The Fault in Our Stars", "John Green", "Romance", 2012, "9780525478812", 6),
+    ("IT", "Stephen King", "Horror", 1986, "9781501142970", 4),
+    ("The Maze Runner", "James Dashner", "Sci-Fi", 2009, "9780385737951", 6),
+    ("The Girl on the Train", "Paula Hawkins", "Thriller", 2015, "9781594634024", 5),
+    ("The Silent Patient", "Alex Michaelides", "Thriller", 2019, "9781250301697", 4),
+]
+
 
     for b in books:
         cursor.execute("""
-            INSERT INTO books (title, author_id, genre, publish_year, isbn, available_copies)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, b)
+            INSERT INTO books (title, author, genre, publish_year, isbn, available_copies, date_added)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (
+            b[0], b[1], b[2], b[3], b[4], b[5],
+            datetime.date.today().isoformat()
+        ))
 
     db.commit()
 
@@ -310,6 +329,24 @@ def search():
 @app.route("/")
 def index():
     return jsonify({"message": "Library API Running"})
+
+@app.route("/authors")
+def authors_page():
+    cursor.execute("SELECT DISTINCT author FROM books WHERE author IS NOT NULL AND author != ''")
+    authors = cursor.fetchall()
+
+    html = """
+    <h1>Authors</h1>
+    <ul>
+    {% for a in authors %}
+        <li>{{ a.author }}</li>
+    {% endfor %}
+    </ul>
+    <br>
+    <a href="/books">⬅ Back to Books</a>
+    """
+    return render_template_string(html, authors=authors)
+
 
 if __name__ == "__main__":
     seed_books()   
