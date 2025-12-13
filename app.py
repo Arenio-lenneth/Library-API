@@ -209,7 +209,27 @@ def login():
     if not user or not bcrypt.check_password_hash(user["password"], password):
         return "Invalid credentials"
 
-    return "<h3>Login successful</h3><a href='/books'>View Books</a>"
+    token = jwt.encode(
+    {
+        "user": username,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    },
+    app.config["SECRET_KEY"],
+    algorithm="HS256"
+)
+
+    return f"""
+    <h2>Login Successful</h2>
+
+    <p><strong>Your JWT Token:</strong></p>
+    <textarea rows="6" cols="80">{token}</textarea>
+
+    <br><br>
+    <p>Use this token for API requests</p>
+
+    <a href="/books">📚 View Books</a>
+    """
+
 
 
 # ----------------------------------
