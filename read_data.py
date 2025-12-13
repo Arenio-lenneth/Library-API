@@ -1,18 +1,21 @@
 import json
 
-with open('data.json', 'r') as file:
+with open('library.json', 'r') as file:
     data = json.load(file)
 
-for student in data['students']:
-    student_id = student['student_id']
-    major = student['major']
-    name = student['name']
-    age = student['age']
-    date = student.get('date', 'N/A')
+for book in data['library_db']:
+    book_id = book['book_id']
+    title = book['title']
+    author = book['author']
+    year = book['year']
+    genre = book.get('genre', 'N/A')
+    date = book.get('date', 'N/A')
 
-    print(f"Student ID: {student_id}")
-    print(f"Major: {major}")
-    print(f"Name: {name}")
-    print(f"Age: {age}")
-    print(f"Date: {date}")
+    print(f"Book ID: {book_id}")
+    print(f"Title: {title}")
+    print(f"Author: {author}")
+    print(f"Year: {year}")
+    print(f"Genre: {genre}")
+    print(f"Date Added: {date}")
     print("-" * 20)
+

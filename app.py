@@ -1,270 +1,291 @@
-from flask import Flask, request, jsonify, make_response
-import os
+from flask import Flask, request, jsonify, make_response, render_template_string
+from flask_bcrypt import Bcrypt
+from functools import wraps
+import datetime
+import jwt
+import xmltodict
 import importlib
+import os
+
+# ----------------------------------
+# APP SETUP
+# ----------------------------------
+app = Flask(__name__)
+bcrypt = Bcrypt(app)
+
+app.config["SECRET_KEY"] = "supersecretkey"
+app.config["JWT_EXP_HOURS"] = 2
+
+# ----------------------------------
+# DATABASE (MySQL with SQLite fallback)
+# ----------------------------------
 mysql_connector = None
 try:
     mysql_connector = importlib.import_module("mysql.connector")
     MYSQL_AVAILABLE = True
 except Exception:
     MYSQL_AVAILABLE = False
-import xmltodict
-import jwt
-import datetime
-from functools import wraps
-from flask_bcrypt import Bcrypt
-from config import Config
 
-app = Flask(__name__)
-bcrypt = Bcrypt(app)
-
-# Load configuration from `config.py` (allows env overrides)
-app.config.from_object(Config)
-
-# Database connection using config values. If mysql-connector is not installed
-# fall back to a local SQLite DB so the app can run for development/testing.
 if MYSQL_AVAILABLE:
-    try:
-        db = mysql_connector.connect(
-            host=app.config.get("MYSQL_HOST", "localhost"),
-            user=app.config.get("MYSQL_USER", "root"),
-            password=app.config.get("MYSQL_PASSWORD", ""),
-            database=app.config.get("MYSQL_DB", "library_db")
-        )
-        cursor = db.cursor(dictionary=True)
-    except mysql_connector.Error as e:
-        raise RuntimeError(f"Database connection failed: {e}")
+    db = mysql_connector.connect(
+        host="localhost",
+        user="root",
+        password="root",
+        database="library_db"
+    )
+    cursor = db.cursor(dictionary=True)
 else:
-    # Use SQLite fallback
     import sqlite3
-    db_path = os.path.join(os.path.dirname(__file__), "library.sqlite3")
-    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn = sqlite3.connect("library.sqlite3", check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    raw_cursor = conn.cursor()
+    raw = conn.cursor()
 
-    class SQLiteCursorWrapper:
-        def execute(self, sql, params=None):
-            if params is None:
-                params = ()
-            # convert MySQL-style %s placeholders to SQLite ? placeholders
-            sql_conv = sql.replace("%s", "?")
-            return raw_cursor.execute(sql_conv, params)
+    class Cursor:
+        def execute(self, sql, params=()):
+            raw.execute(sql.replace("%s", "?"), params)
 
         def fetchone(self):
-            row = raw_cursor.fetchone()
-            return dict(row) if row is not None else None
+            row = raw.fetchone()
+            return dict(row) if row else None
 
         def fetchall(self):
-            rows = raw_cursor.fetchall()
-            return [dict(r) for r in rows]
+            return [dict(r) for r in raw.fetchall()]
 
-    cursor = SQLiteCursorWrapper()
+    cursor = Cursor()
     db = conn
 
-    # Ensure minimal tables exist for local testing
-    raw_cursor.execute(
-        """CREATE TABLE IF NOT EXISTS users (
-           id INTEGER PRIMARY KEY AUTOINCREMENT,
-           username TEXT UNIQUE NOT NULL,
-           password TEXT NOT NULL
-        )"""
-    )
-    raw_cursor.execute(
-        """CREATE TABLE IF NOT EXISTS books (
-           book_id INTEGER PRIMARY KEY AUTOINCREMENT,
-           title TEXT,
-           author_id INTEGER,
-           genre TEXT,
-           publish_year INTEGER,
-           isbn TEXT,
-           available_copies INTEGER
-        )"""
-    )
+    raw.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT
+        )
+    """)
+
+    raw.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            book_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            author TEXT,
+            genre TEXT,
+            publish_year INTEGER,
+            isbn TEXT,
+            available_copies INTEGER,
+            date_added TEXT
+        )
+    """)
     conn.commit()
 
+def seed_books():
+    cursor.execute("SELECT COUNT(*) AS total FROM books")
+    result = cursor.fetchone()
 
-# ---------------------------------------------
-# JWT AUTH DECORATOR
-# ---------------------------------------------
+    # for SQLite fallback compatibility
+    total = list(result.values())[0] if isinstance(result, dict) else result[0]
+
+    if total > 0:
+        return  # already seeded
+
+    books = [
+        ("The Great Gatsby", "F. Scott Fitzgerald", "Fiction", 1925, "9780743273565", 5),
+        ("1984", "George Orwell", "Dystopian", 1949, "9780451524935", 3),
+        ("To Kill a Mockingbird", "Harper Lee", "Classic", 1960, "9780061120084", 7),
+        ("Harry Potter and the Sorcerer's Stone", "J.K. Rowling", "Fantasy", 1997, "9780590353427", 10),
+        ("The Hobbit", "J.R.R. Tolkien", "Fantasy", 1937, "9780547928227", 4),
+    ]
+
+    for b in books:
+        cursor.execute("""
+            INSERT INTO books (title, author_id, genre, publish_year, isbn, available_copies)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, b)
+
+    db.commit()
+
+
+# ----------------------------------
+# JWT DECORATOR
+# ----------------------------------
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = None
-
-        # Token must be included in the request headers
-        if "Authorization" in request.headers:
-            token = request.headers["Authorization"].replace("Bearer ", "")
-
+        token = request.headers.get("Authorization")
         if not token:
             return jsonify({"error": "Token missing"}), 401
 
         try:
-            jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
-        except jwt.ExpiredSignatureError:
-            return jsonify({"error": "Token has expired"}), 401
-        except jwt.InvalidTokenError:
-            return jsonify({"error": "Invalid token"}), 401
+            jwt.decode(token.replace("Bearer ", ""), app.config["SECRET_KEY"], algorithms=["HS256"])
+        except:
+            return jsonify({"error": "Invalid or expired token"}), 401
 
         return f(*args, **kwargs)
     return decorated
 
+# ----------------------------------
+# FORMAT RESPONSE (JSON / XML)
+# ----------------------------------
+def respond(data):
+    fmt = request.args.get("format", "json")
+    if fmt == "xml":
+        xml = xmltodict.unparse({"response": data}, pretty=True)
+        res = make_response(xml)
+        res.headers["Content-Type"] = "application/xml"
+        return res
+    return jsonify(data)
 
-# ---------------------------------------------
-# REGISTER ENDPOINT (create user with bcrypt hash)
-# ---------------------------------------------
+# ----------------------------------
+# AUTH ROUTES
+# ----------------------------------
 @app.route("/register", methods=["POST"])
 def register():
-    data = request.json or {}
-    username = data.get("username")
-    password = data.get("password")
+    data = request.json
+    if not data.get("username") or not data.get("password"):
+        return jsonify({"error": "Username and password required"}), 400
 
-    if not username or not password:
-        return jsonify({"error": "username and password are required"}), 400
-
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
+    cursor.execute("SELECT * FROM users WHERE username=%s", (data["username"],))
     if cursor.fetchone():
-        return jsonify({"error": "User already exists"}), 409
+        return jsonify({"error": "User exists"}), 409
 
-    pw_hash = bcrypt.generate_password_hash(password).decode("utf-8")
-    cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", (username, pw_hash))
+    pw = bcrypt.generate_password_hash(data["password"]).decode()
+    cursor.execute("INSERT INTO users (username, password) VALUES (%s,%s)", (data["username"], pw))
     db.commit()
-    return jsonify({"message": "User created"}), 201
+    return jsonify({"message": "User registered"}), 201
 
-
-# ---------------------------------------------
-# LOGIN ENDPOINT (returns JWT)
-# ---------------------------------------------
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.json or {}
-    username = data.get("username")
-    password = data.get("password")
-
-    if not username or not password:
-        return jsonify({"error": "username and password are required"}), 400
-
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
+    data = request.json
+    cursor.execute("SELECT * FROM users WHERE username=%s", (data["username"],))
     user = cursor.fetchone()
 
-    if not user:
-        return jsonify({"error": "User not found"}), 404
+    if not user or not bcrypt.check_password_hash(user["password"], data["password"]):
+        return jsonify({"error": "Invalid credentials"}), 401
 
-    if not bcrypt.check_password_hash(user["password"], password):
-        return jsonify({"error": "Wrong password"}), 401
-
-    token = jwt.encode(
-        {
-            "user": username,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=app.config.get("JWT_EXP_HOURS", 2))
-        },
-        app.config["SECRET_KEY"],
-        algorithm="HS256"
-    )
-
-    # PyJWT v2 returns a string, older versions may return bytes
-    if isinstance(token, bytes):
-        token = token.decode("utf-8")
+    token = jwt.encode({
+        "user": user["username"],
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    }, app.config["SECRET_KEY"], algorithm="HS256")
 
     return jsonify({"token": token})
 
-
-# ---------------------------------------------
-# Helper for XML/JSON formatting
-# ---------------------------------------------
-def respond(data, format_type):
-    if format_type == "xml":
-        xml_data = xmltodict.unparse({"response": data}, pretty=True)
-        response = make_response(xml_data, 200)
-        response.headers["Content-Type"] = "application/xml"
-        return response
-    return jsonify(data)
-
-
-# ---------------------------------------------
-# PROTECTED ROUTES (ALL REQUIRE JWT)
-# ---------------------------------------------
-
-# GET ALL BOOKS
-@app.route('/books', methods=['GET'])
-@token_required
-def get_books():
-    format_type = request.args.get("format", "json")
+# ----------------------------------
+# PUBLIC BOOK VIEW (NO TOKEN)
+# ----------------------------------
+@app.route("/books")
+def books_page():
     cursor.execute("SELECT * FROM books")
     books = cursor.fetchall()
-    return respond(books, format_type)
 
+    html = """
+    <h1>Library Books</h1>
+    {% for b in books %}
+    <pre>
+Book ID: {{b.book_id}}
+Title: {{b.title}}
+Author: {{b.author}}
+Genre: {{b.genre}}
+Publish Year: {{b.publish_year}}
+ISBN: {{b.isbn}}
+Available Copies: {{b.available_copies}}
+Date Added: {{b.date_added or 'N/A'}}
+-------------------------
+    </pre>
+    {% endfor %}
+    """
+    return render_template_string(html, books=books)
 
-# GET ONE BOOK
-@app.route('/books/<int:id>', methods=['GET'])
+# ----------------------------------
+# CRUD API (PROTECTED)
+# ----------------------------------
+@app.route("/api/books", methods=["GET"])
+@token_required
+def get_books():
+    cursor.execute("SELECT * FROM books")
+    return respond(cursor.fetchall())
+
+@app.route("/api/books/<int:id>", methods=["GET"])
 @token_required
 def get_book(id):
-    cursor.execute("SELECT * FROM books WHERE book_id = %s", (id,))
+    cursor.execute("SELECT * FROM books WHERE book_id=%s", (id,))
     book = cursor.fetchone()
     if not book:
-        return jsonify({"error": "Book not found"}), 404
-    return jsonify(book)
+        return jsonify({"error": "Not found"}), 404
+    return respond(book)
 
-
-# ADD BOOK
-@app.route('/books', methods=['POST'])
+@app.route("/api/books", methods=["POST"])
 @token_required
 def add_book():
-    data = request.json or {}
-    required = ["title", "author_id", "genre", "publish_year", "isbn", "available_copies"]
+    data = request.json
+    required = ["title", "author", "genre", "publish_year", "isbn", "available_copies"]
+    if not all(k in data for k in required):
+        return jsonify({"error": "Missing fields"}), 400
 
-    for field in required:
-        if field not in data:
-            return jsonify({"error": f"Missing field: {field}"}), 400
-
-    sql = """INSERT INTO books (title, author_id, genre, publish_year, isbn, available_copies)
-             VALUES (%s, %s, %s, %s, %s, %s)"""
-    values = (data["title"], data["author_id"], data["genre"], data["publish_year"],
-              data["isbn"], data["available_copies"])
-
-    cursor.execute(sql, values)
+    cursor.execute("""
+        INSERT INTO books VALUES (NULL,%s,%s,%s,%s,%s,%s,%s)
+    """, (
+        data["title"], data["author"], data["genre"],
+        data["publish_year"], data["isbn"],
+        data["available_copies"],
+        datetime.date.today().isoformat()
+    ))
     db.commit()
-
     return jsonify({"message": "Book added"}), 201
 
-
-# UPDATE BOOK
-@app.route('/books/<int:id>', methods=['PUT'])
+@app.route("/api/books/<int:id>", methods=["PUT"])
 @token_required
 def update_book(id):
-    data = request.json or {}
-    sql = """UPDATE books SET title=%s, genre=%s, publish_year=%s, 
-             isbn=%s, available_copies=%s WHERE book_id=%s"""
-    values = (data.get("title"), data.get("genre"), data.get("publish_year"),
-              data.get("isbn"), data.get("available_copies"), id)
-
-    cursor.execute(sql, values)
+    data = request.json
+    cursor.execute("""
+        UPDATE books SET title=%s, genre=%s, available_copies=%s WHERE book_id=%s
+    """, (data["title"], data["genre"], data["available_copies"], id))
     db.commit()
     return jsonify({"message": "Book updated"})
 
-
-# DELETE BOOK
-@app.route('/books/<int:id>', methods=['DELETE'])
+@app.route("/api/books/<int:id>", methods=["DELETE"])
 @token_required
 def delete_book(id):
     cursor.execute("DELETE FROM books WHERE book_id=%s", (id,))
     db.commit()
     return jsonify({"message": "Book deleted"})
 
+@app.route("/books/<int:id>")
+def view_book(id):
+    cursor.execute("SELECT * FROM books WHERE book_id = %s", (id,))
+    book = cursor.fetchone()
 
+    if not book:
+        return "<h1>Book not found</h1>", 404
+
+    html = f"""
+    <h1>{book['title']}</h1>
+    <p><strong>Book ID:</strong> {book['book_id']}</p>
+    <p><strong>Genre:</strong> {book['genre']}</p>
+    <p><strong>Publish Year:</strong> {book['publish_year']}</p>
+    <p><strong>ISBN:</strong> {book['isbn']}</p>
+    <p><strong>Available Copies:</strong> {book['available_copies']}</p>
+
+    <br>
+    <a href="/books">⬅ Back to Books</a>
+    """
+
+    return html
+
+# ----------------------------------
 # SEARCH
-@app.route('/search')
+# ----------------------------------
+@app.route("/api/search")
 @token_required
-def search_books():
-    keyword = request.args.get("q", "")
-    sql = "SELECT * FROM books WHERE title LIKE %s OR genre LIKE %s"
-    cursor.execute(sql, (f"%{keyword}%", f"%{keyword}%"))
-    results = cursor.fetchall()
-    return jsonify(results)
+def search():
+    q = request.args.get("q", "")
+    cursor.execute("SELECT * FROM books WHERE title LIKE %s OR genre LIKE %s",
+                   (f"%{q}%", f"%{q}%"))
+    return respond(cursor.fetchall())
 
-
-@app.route('/')
+# ----------------------------------
+@app.route("/")
 def index():
-    return jsonify({"message": "Library API is running"})
-
+    return jsonify({"message": "Library API Running"})
 
 if __name__ == "__main__":
+    seed_books()   
     app.run(debug=True)
+
