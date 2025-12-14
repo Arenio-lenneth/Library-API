@@ -11,6 +11,8 @@ import datetime
 import jwt
 import mysql.connector
 import xml.etree.ElementTree as ET
+from mysql.connector import Error
+
 
 # ==================================================
 # APP SETUP
@@ -143,19 +145,54 @@ def register():
         </style>
         <h2>Register</h2>
         <form method="POST">
-            <input name="username" placeholder="Username"><br><br>
-            <input name="password" type="password" placeholder="Password"><br><br>
+            <input name="username" placeholder="Username" required><br><br>
+            <input name="password" type="password" placeholder="Password" required><br><br>
             <button>Register</button>
         </form>
         """
 
+    username = request.form["username"]
+    password = request.form["password"]
 
-    db = get_db(); cur = db.cursor(dictionary=True)
-    pw = bcrypt.generate_password_hash(request.form["password"]).decode()
-    cur.execute("INSERT INTO users (username,password) VALUES (%s,%s)",
-                (request.form["username"], pw))
-    db.commit(); db.close()
-    return "<h3>Registered</h3><a href='/login'>Login</a>"
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+
+    try:
+        pw = bcrypt.generate_password_hash(password).decode()
+        cur.execute(
+            "INSERT INTO users (username, password) VALUES (%s, %s)",
+            (username, pw)
+        )
+        db.commit()
+
+    except Error as e:
+        # 🔴 DUPLICATE USERNAME
+        if e.errno == 1062:
+            return """
+            <style>
+            body{background:#121212;color:#fff;font-family:Segoe UI;padding:40px}
+            a{color:#ff4d8d}
+            </style>
+            <h3>⚠ Username already exists</h3>
+            <p>Please choose a different username.</p>
+            <a href="/register">← Try again</a>
+            """
+
+        # 🔴 OTHER DB ERRORS
+        return f"<h3>Database error: {e}</h3>"
+
+    finally:
+        db.close()
+
+    return """
+    <style>
+    body{background:#121212;color:#fff;font-family:Segoe UI;padding:40px}
+    a{color:#ff4d8d}
+    </style>
+    <h3>✅ Registration successful</h3>
+    <a href="/login">Go to Login</a>
+    """
+
 
 
 @app.route("/login", methods=["GET","POST"])
