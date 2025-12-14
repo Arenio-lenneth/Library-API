@@ -431,18 +431,58 @@ def add_author_page():
 @app.route("/books/search")
 @token_required
 def search_books():
-    q = request.args.get("q","")
-    db = get_db(); cur = db.cursor(dictionary=True)
+    q = request.args.get("q", "").strip()
+
+    # 🚫 prevent empty search
+    if not q:
+        return render_template_string("""
+        <style>
+        body{background:#121212;color:#fff;font-family:Segoe UI;padding:30px}
+        a{color:#ff4d8d}
+        </style>
+
+        <h3>⚠ Please enter a search term</h3>
+        <a href="/books">← Back to Books</a>
+        """)
+
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+
     cur.execute("""
         SELECT b.book_id, b.title,
-        CONCAT(a.first_name,' ',a.last_name) AS author,
-        b.genre, b.publish_year
-        FROM books b JOIN authors a ON b.author_id=a.author_id
+               CONCAT(a.first_name,' ',a.last_name) AS author,
+               b.genre, b.publish_year
+        FROM books b
+        JOIN authors a ON b.author_id=a.author_id
         WHERE b.title LIKE %s OR b.genre LIKE %s
     """, (f"%{q}%", f"%{q}%"))
-    data = cur.fetchall(); db.close()
 
-    return respond(data, "books")
+    data = cur.fetchall()
+    db.close()
+
+    return render_template_string("""
+    <style>
+        body{background:#121212;color:#fff;font-family:Segoe UI;padding:30px}
+        .card{background:#1e1e1e;padding:15px;border-radius:10px;margin-bottom:10px}
+        a{color:#ff4d8d}
+    </style>
+
+    <h2>🔍 Search Results for "{{ q }}"</h2>
+    <a href="/books">← Back to Books</a><br><br>
+
+    {% if books %}
+        {% for b in books %}
+        <div class="card">
+            <b>{{ b.title }}</b><br>
+            {{ b.author }} • {{ b.genre }} • {{ b.publish_year }}
+        </div>
+        {% endfor %}
+    {% else %}
+        <p>No matching books found.</p>
+    {% endif %}
+    """, books=data, q=q)
+
+
 
 
 # ==================================================
