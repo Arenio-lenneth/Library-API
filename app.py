@@ -4,7 +4,7 @@
 # Restaurant-style clean structure
 # ==================================================
 
-from flask import Flask, request, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 from flask_bcrypt import Bcrypt
 from functools import wraps
 import datetime
@@ -550,14 +550,15 @@ def add_book():
     db = get_db(); cur = db.cursor()
     cur.execute("""
         INSERT INTO books
-        (title,author_id,genre,publish_year,available_copies,date_added)
-        VALUES (%s,%s,%s,%s,%s,%s)
+        (title,author_id,genre,publish_year,available_copies)
+        VALUES (%s,%s,%s,%s,%s)
     """, (
         request.form["title"], request.form["author_id"], request.form["genre"],
-        request.form["publish_year"], request.form["available_copies"], datetime.date.today()
+        request.form["publish_year"], request.form["available_copies"],
     ))
     db.commit(); db.close()
-    return "<h3>Book Added</h3><a href='/books'>Back</a>"
+    return redirect(url_for("books"))
+
 
 
 @app.route("/books/edit/<int:id>", methods=["GET", "POST"])
@@ -584,7 +585,8 @@ def edit_book(id):
         request.form["title"], request.form["genre"], request.form["available_copies"], id
     ))
     db.commit(); db.close()
-    return "<h3>Updated</h3><a href='/books'>Back</a>"
+    return redirect(url_for("books"))
+
 
 @app.route("/books/delete/<int:id>")
 @token_required
@@ -592,7 +594,8 @@ def delete_book(id):
     db = get_db(); cur = db.cursor()
     cur.execute("DELETE FROM books WHERE book_id=%s", (id,))
     db.commit(); db.close()
-    return "<h3>Deleted</h3><a href='/books'>Back</a>"
+    return redirect(url_for("books"))
+
 
 # ==================================================
 # HOME + RUN
