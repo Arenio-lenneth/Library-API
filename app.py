@@ -1,490 +1,638 @@
-from flask import Flask, request, jsonify, render_template_string
+# ==================================================
+# LIBRARY API (JSON + XML)
+# Flask + MySQL + JWT + Session
+# Restaurant-style clean structure
+# ==================================================
+
+from flask import Flask, request, jsonify, render_template_string, session
 from flask_bcrypt import Bcrypt
 from functools import wraps
 import datetime
 import jwt
 import mysql.connector
-from flask import session
-
-def to_xml(data, root_name="items"):
-    from xml.etree.ElementTree import Element, SubElement, tostring
-
-    root = Element(root_name)
-
-    for item in data:
-        item_el = SubElement(root, "item")
-        for key, value in item.items():
-            child = SubElement(item_el, key)
-            child.text = str(value)
-
-    return tostring(root, encoding="utf-8")
-
+import xml.etree.ElementTree as ET
 
 # ==================================================
 # APP SETUP
 # ==================================================
 app = Flask(__name__)
 bcrypt = Bcrypt(app)
-
-app.config["SECRET_KEY"] = "supersecretkey"
-app.config["JWT_EXP_HOURS"] = 2
+app.config.update(SECRET_KEY="supersecretkey", JWT_EXP_HOURS=2)
 
 # ==================================================
-# DATABASE (MySQL)
+# DATABASE CONFIG
 # ==================================================
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
-    "password": "root",       
+    "password": "root",
     "database": "library_db"
 }
 
-db = mysql.connector.connect(**DB_CONFIG)
-cursor = db.cursor(dictionary=True)
+def get_db():
+    return mysql.connector.connect(**DB_CONFIG)
 
 # ==================================================
-# TABLES
+# DB INIT
 # ==================================================
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    username VARCHAR(100) UNIQUE,
-    password VARCHAR(255)
-)
-""")
 
+def init_db():
+    db = get_db(); cur = db.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS authors (
-    author_id INT AUTO_INCREMENT PRIMARY KEY,
-    first_name VARCHAR(100) NOT NULL,
-    last_name VARCHAR(100) NOT NULL
-)
-""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(100) UNIQUE,
+        password VARCHAR(255)
+    )""")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS books (
-    book_id INT AUTO_INCREMENT PRIMARY KEY,
-    title VARCHAR(255),
-    author_id INT,
-    genre VARCHAR(100),
-    publish_year INT,
-    isbn VARCHAR(50),
-    available_copies INT,
-    date_added DATE,
-    FOREIGN KEY (author_id) REFERENCES authors(author_id)
-)
-""")
-db.commit()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS authors (
+        author_id INT AUTO_INCREMENT PRIMARY KEY,
+        first_name VARCHAR(100),
+        last_name VARCHAR(100)
+    )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS books (
+        book_id INT AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(255),
+        author_id INT,
+        genre VARCHAR(100),
+        publish_year INT,
+        available_copies INT,
+        date_added DATE,
+        FOREIGN KEY (author_id) REFERENCES authors(author_id)
+    )""")
+
+    db.commit(); db.close()
 
 # ==================================================
-# SEED AUTHORS AND BOOKS
+# XML + RESPONSE HELPER
 # ==================================================
-def seed_authors():
-    authors = [
-        "J.K.", "Rowling",
-        "George", "Orwell",
-        "Harper", "Lee",
-        "F. Scott", "Fitzgerald",
-        "J.D.", "Salinger",
-        "Jane", "Austen",
-        "J.R.R.", "Tolkien",
-        "Paulo", "Coelho",
-        "Dan", "Brown",
-        "Suzanne", "Collins"
-    ]
 
-    for first_name, last_name in zip(authors[::2], authors[1::2]):
-        cursor.execute(
-            "INSERT IGNORE INTO authors (first_name, last_name) VALUES (%s, %s)",
-            (first_name, last_name)
+def to_xml(data, root="items"):
+    root_el = ET.Element(root)
+    for row in data:
+        item = ET.SubElement(root_el, "item")
+        for k, v in row.items():
+            ET.SubElement(item, k).text = str(v)
+    return ET.tostring(root_el, encoding="utf-8")
+
+
+def respond(data, root="items"):
+    fmt = request.args.get("format", "").lower()
+    accept = request.headers.get("Accept", "").lower()
+
+    # Explicit XML
+    if fmt == "xml":
+        return app.response_class(
+            to_xml(data, root),
+            mimetype="application/xml"
         )
-    db.commit()
 
+    # Explicit JSON
+    if fmt == "json":
+        return jsonify(data)
 
-def seed_books():
-    cursor.execute("SELECT COUNT(*) AS total FROM books")
-    if cursor.fetchone()["total"] > 0:
-        return
+    # Header-based fallback
+    if "application/xml" in accept:
+        return app.response_class(
+            to_xml(data, root),
+            mimetype="application/xml"
+        )
 
-    books = [
-        ("Harry Potter and the Chamber of Secrets", 1, "Fantasy", 1998, "9780439064873", 4),
-        ("1984", 2, "Dystopian", 1949, "9780451524935", 3),
-        ("The Hobbit", 7, "Fantasy", 1937, "9780547928227", 6),
-    ]
-
-    for b in books:
-        cursor.execute("""
-        INSERT INTO books
-        (title, author_id, genre, publish_year, isbn, available_copies, date_added)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
-        """, (*b, datetime.date.today()))
-
-    db.commit()
-
-
-seed_authors()
-seed_books()
+    return jsonify(data)
 
 
 # ==================================================
 # JWT DECORATOR
 # ==================================================
+
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-
-        token = None
-
-        # 1️⃣ API token
-        auth_header = request.headers.get("Authorization")
-        if auth_header:
-            token = auth_header.replace("Bearer ", "")
-
-        # 2️⃣ Browser session token
-        if not token:
+        token = request.headers.get("Authorization")
+        if token and token.startswith("Bearer "):
+            token = token.replace("Bearer ", "")
+        else:
             token = session.get("token")
 
         if not token:
             return jsonify({"error": "Token missing"}), 401
 
         try:
-            jwt.decode(
-                token,
-                app.config["SECRET_KEY"],
-                algorithms=["HS256"]
-            )
+            jwt.decode(token, app.config["SECRET_KEY"], algorithms=["HS256"])
         except:
             return jsonify({"error": "Invalid or expired token"}), 401
 
         return f(*args, **kwargs)
-
     return decorated
 
-
 # ==================================================
-# AUTH API
+# AUTH
 # ==================================================
-@app.route("/api/register", methods=["GET", "POST"])
-def api_register():
-    # ===============================
-    # GET → Show HTML form (Browser)
-    # ===============================
+@app.route("/register", methods=["GET","POST"])
+def register():
     if request.method == "GET":
         return """
-        <h1>Register (API)</h1>
+        <style>
+        body{background:#121212;color:#fff;font-family:Segoe UI;padding:40px}
+        input{padding:8px;width:250px}
+        button{background:#ff4d8d;color:white;padding:8px 16px;border-radius:8px}
+        </style>
+        <h2>Register</h2>
+        <form method="POST">
+            <input name="username" placeholder="Username"><br><br>
+            <input name="password" type="password" placeholder="Password"><br><br>
+            <button>Register</button>
+        </form>
+        """
+
+
+    db = get_db(); cur = db.cursor(dictionary=True)
+    pw = bcrypt.generate_password_hash(request.form["password"]).decode()
+    cur.execute("INSERT INTO users (username,password) VALUES (%s,%s)",
+                (request.form["username"], pw))
+    db.commit(); db.close()
+    return "<h3>Registered</h3><a href='/login'>Login</a>"
+
+
+@app.route("/login", methods=["GET","POST"])
+def login():
+    if request.method == "GET":
+        return """
+        <style>
+        body{
+            background:#121212;
+            color:#fff;
+            font-family:Segoe UI;
+            padding:40px
+        }
+        input{
+            padding:10px;
+            width:260px;
+            background:#1e1e1e;
+            color:#fff;
+            border:1px solid #333;
+            border-radius:8px
+        }
+        button{
+            background:#ff4d8d;
+            color:white;
+            padding:10px 18px;
+            border-radius:10px;
+            border:none;
+            font-weight:600;
+            cursor:pointer
+        }
+        textarea{
+            width:100%;
+            max-width:600px;
+            height:120px;
+            background:#1e1e1e;
+            color:#00ffcc;
+            border-radius:10px;
+            border:1px solid #333;
+            padding:12px
+        }
+        </style>
+
+        <h2>Login</h2>
         <form method="POST">
             <input name="username" placeholder="Username" required><br><br>
             <input name="password" type="password" placeholder="Password" required><br><br>
-            <button>Register</button>
-        </form>
-        <br>
-        <a href="/login">Login</a>
-        """
-
-    # ===============================
-    # POST → JSON or Form
-    # ===============================
-    data = request.get_json(silent=True)
-
-    if data:
-        username = data.get("username")
-        password = data.get("password")
-    else:
-        username = request.form.get("username")
-        password = request.form.get("password")
-
-    if not username or not password:
-        return jsonify({"error": "Missing fields"}), 400
-
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-    if cursor.fetchone():
-        return jsonify({"error": "User already exists"}), 409
-
-    pw = bcrypt.generate_password_hash(password).decode()
-    cursor.execute(
-        "INSERT INTO users (username,password) VALUES (%s,%s)",
-        (username, pw)
-    )
-    db.commit()
-
-    # Browser-friendly response
-    if not data:
-        return """
-        <h2>Registration successful</h2>
-        <a href="/login">Go to Login</a>
-        """
-
-    # API response
-    return jsonify({"message": "Registered successfully"}), 201
-
-
-@app.route("/register", methods=["GET", "POST"])
-def register_page():
-    if request.method == "GET":
-        return """
-        <h1>Register</h1>
-        <form method="POST">
-            <input name="username" placeholder="Username" required><br><br>
-            <input name="password" type="password" placeholder="Password" required><br><br>
-            <button>Register</button>
-        </form>
-        <br>
-        <a href="/login">Already have an account? Login</a>
-        """
-
-    username = request.form["username"]
-    password = request.form["password"]
-
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-    if cursor.fetchone():
-        return "<h3>User already exists</h3><a href='/register'>Back</a>"
-
-    pw = bcrypt.generate_password_hash(password).decode()
-
-    cursor.execute(
-        "INSERT INTO users (username, password) VALUES (%s, %s)",
-        (username, pw)
-    )
-    db.commit()
-
-    return """
-    <h2>Registration successful</h2>
-    <a href="/login">Go to Login</a>
-    """
-
-
-@app.route("/api/login", methods=["GET", "POST"])
-def api_login():
-    if request.method == "GET":
-        return """
-        <h1>API Login</h1>
-        <form method="POST">
-            <input name="username" placeholder="Username" required><br><br>
-            <input name="password" type="password" required><br><br>
             <button>Login</button>
         </form>
         """
 
-    # Accept JSON or FORM
-    if request.is_json:
-        data = request.get_json()
-        username = data.get("username")
-        password = data.get("password")
-    else:
-        username = request.form.get("username")
-        password = request.form.get("password")
+    # ---------- LOGIN LOGIC ----------
+    db = get_db()
+    cur = db.cursor(dictionary=True)
+    cur.execute("SELECT * FROM users WHERE username=%s", (request.form["username"],))
+    user = cur.fetchone()
+    db.close()
 
-    cursor.execute("SELECT * FROM users WHERE username=%s", (username,))
-    user = cursor.fetchone()
-
-    if not user or not bcrypt.check_password_hash(user["password"], password):
+    if not user or not bcrypt.check_password_hash(
+        user["password"], request.form["password"]
+    ):
         return "<h3>Invalid credentials</h3>"
 
     token = jwt.encode(
         {
-            "user": username,
+            "user": user["username"],
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
         },
         app.config["SECRET_KEY"],
         algorithm="HS256"
     )
 
-    # 🔐 Store token in browser session
+    # 🔐 save in session
     session["token"] = token
 
-    # If browser → redirect
-    if not request.is_json:
-        return f"""
-        <h2>Login Success</h2>
-        <p>JWT saved in session</p>
-        <a href="/api/books">View Books</a>
-        """
+    # ---------- DISPLAY TOKEN ----------
+    return f"""
+    <style>
+    body{{background:#121212;color:#fff;font-family:Segoe UI;padding:40px}}
+    textarea{{width:100%;max-width:600px;height:120px;
+              background:#1e1e1e;color:#00ffcc;
+              border-radius:10px;padding:12px}}
+    a{{color:#ff4d8d;font-weight:600}}
+    </style>
 
-    return jsonify({"token": token})
+    <h2>✅ Login Successful</h2>
+
+    <p><b>Your JWT Token:</b></p>
+    <textarea readonly>{token}</textarea>
+
+    <br><br>
+    <a href="/books">📚 Go to Books</a>
+    """
 
 
 # ==================================================
-# BOOKS API (FULL CRUD)
+# BOOKS (HTML + JSON + XML)
 # ==================================================
-@app.route("/api/books", methods=["GET"])
+@app.route("/books")
 @token_required
-def api_books():
-    cursor.execute("""
-        SELECT 
-            b.book_id,
-            b.title,
-            CONCAT(a.first_name, ' ', a.last_name) AS author,
-            b.genre,
-            b.publish_year,
-            b.isbn,
-            b.available_copies
-        FROM books b
-        JOIN authors a ON b.author_id = a.author_id
+def books():
+    db = get_db(); cur = db.cursor(dictionary=True)
+    cur.execute("""
+        SELECT b.book_id, b.title,
+        CONCAT(a.first_name,' ',a.last_name) AS author,
+        b.genre, b.publish_year, b.available_copies
+        FROM books b JOIN authors a ON b.author_id=a.author_id
     """)
-    books = cursor.fetchall()
+    data = cur.fetchall(); db.close()
 
-    format_type = request.args.get("format", "json").lower()
+    if request.args.get("format") or "application/json" in request.headers.get("Accept", ""):
+        return respond(data, "books")
 
-    if format_type == "xml":
-        xml_data = to_xml(books, root_name="books")
-        return app.response_class(xml_data, mimetype="application/xml")
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Library Books</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            padding: 30px;
+        }
 
-    return jsonify(books)
+        h1 {
+            color: #ffffff;
+            margin-bottom: 15px;
+        }
 
+        a {
+            text-decoration: none;
+            color: #cfcfcf;
+        }
 
-@app.route("/api/authors", methods=["GET"])
+        a:hover {
+            color: #ffffff;
+        }
+
+        /* 🔴 BUTTON ONLY PINK */
+        .btn-pink {
+            display: inline-block;
+            background-color: #ff4d8d;
+            color: #fff;
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-weight: 600;
+            margin-bottom: 25px;
+        }
+
+        .btn-pink:hover {
+            background-color: #e13c77;
+        }
+
+        .book {
+            background-color: #1e1e1e;
+            border-radius: 12px;
+            padding: 16px 22px;
+            margin-bottom: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+        }
+
+        .book-title {
+            font-size: 17px;
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .book-meta {
+            font-size: 14px;
+            color: #aaaaaa;
+            margin-top: 4px;
+        }
+
+        .actions a {
+            margin-left: 12px;
+            font-size: 18px;
+            color: #bbbbbb;
+        }
+
+        .actions a:hover {
+            color: #ffffff;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>📚 Library Books</h1>
+
+    <!-- PINK BUTTON -->
+    <a class="btn-pink" href="/books/add">➕ Add Book</a>
+
+    {% for b in books %}
+    <div class="book">
+        <div>
+            <div class="book-title">{{ b.title }}</div>
+            <div class="book-meta">
+                {{ b.author }} • {{ b.genre }} • {{ b.publish_year }}
+            </div>
+        </div>
+
+        <div class="actions">
+            <a href="/books/edit/{{ b.book_id }}">✏️</a>
+            <a href="/books/delete/{{ b.book_id }}"
+               onclick="return confirm('Delete this book?')">🗑</a>
+        </div>
+    </div>
+    {% endfor %}
+</body>
+</html>
+""", books=data)
+
+@app.route("/authors")
 @token_required
-def get_authors():
-    cursor.execute("SELECT * FROM authors")
-    authors = cursor.fetchall()
+def authors():
+    db = get_db(); cur = db.cursor(dictionary=True)
+    cur.execute("SELECT * FROM authors")
+    data = cur.fetchall(); db.close()
 
-    # Browser
-    if "text/html" in request.headers.get("Accept", ""):
-        html = """
-        <h1>Authors</h1>
-        {% for a in authors %}
-        <p>{{a.author_id}} - {{a.name}}</p>
-        {% endfor %}
+    if request.args.get("format") or "application/json" in request.headers.get("Accept",""):
+        return respond(data, "authors")
+
+    return render_template_string("""
+<!DOCTYPE html>
+<html>
+<head>
+<title>Authors</title>
+<style>
+body { background:#121212; color:#e0e0e0; font-family:Segoe UI; padding:30px }
+.card { background:#1e1e1e; padding:15px; border-radius:10px; margin-bottom:10px }
+.btn { background:#ff4d8d; color:white; padding:8px 14px; border-radius:8px }
+</style>
+</head>
+<body>
+<h1>✍️ Authors</h1>
+<a class="btn" href="/authors/add">➕ Add Author</a><br><br>
+{% for a in authors %}
+<div class="card">
+{{ a.first_name }} {{ a.last_name }}
+</div>
+{% endfor %}
+</body>
+</html>
+""", authors=data)
+
+@app.route("/authors/add", methods=["GET","POST"])
+@token_required
+def add_author_page(): 
+
+    if request.method == "GET":
+        return """
+        <style>
+        body{background:#121212;color:#fff;font-family:Segoe UI;padding:30px}
+        button{background:#ff4d8d;color:white;padding:8px 14px;border-radius:8px}
+        </style>
+        <h2>Add Author</h2>
+        <form method="POST">
+            <input name="first_name" placeholder="First Name"><br><br>
+            <input name="last_name" placeholder="Last Name"><br><br>
+            <button>Add</button>
+        </form>
         """
-        return render_template_string(html, authors=authors)
 
-    return jsonify(authors)
+    db = get_db(); cur = db.cursor()
+    cur.execute("INSERT INTO authors (first_name,last_name) VALUES (%s,%s)",
+                (request.form["first_name"], request.form["last_name"]))
+    db.commit(); db.close()
+    return "<a href='/authors'>Back</a>"
+
+@app.route("/books/search")
+@token_required
+def search_books():
+    q = request.args.get("q","")
+    db = get_db(); cur = db.cursor(dictionary=True)
+    cur.execute("""
+        SELECT b.book_id, b.title,
+        CONCAT(a.first_name,' ',a.last_name) AS author,
+        b.genre, b.publish_year
+        FROM books b JOIN authors a ON b.author_id=a.author_id
+        WHERE b.title LIKE %s OR b.genre LIKE %s
+    """, (f"%{q}%", f"%{q}%"))
+    data = cur.fetchall(); db.close()
+
+    return respond(data, "books")
 
 
-@app.route("/api/books", methods=["POST"])
+# ==================================================
+# CRUD (BROWSER)
+# ==================================================
+@app.route("/books/add", methods=["GET","POST"])
 @token_required
 def add_book():
-    data = request.get_json()
-    cursor.execute("""
+    if request.method == "GET":
+        return """
+        <style>
+        body{background:#121212;color:#fff;font-family:Segoe UI;padding:30px}
+        input{padding:8px;width:250px}
+        button{background:#ff4d8d;color:white;padding:8px 16px;border-radius:8px}
+        </style>
+        <h2>Add Book</h2>
+        <form method="POST">
+            <input name="title" placeholder="Title"><br><br>
+            <input name="author_id" placeholder="Author ID"><br><br>
+            <input name="genre" placeholder="Genre"><br><br>
+            <input name="publish_year" placeholder="Year"><br><br>
+            <input name="available_copies" placeholder="Copies"><br><br>
+            <button>Add</button>
+        </form>
+        """
+
+
+    db = get_db(); cur = db.cursor()
+    cur.execute("""
         INSERT INTO books
-        (title, author_id, genre, publish_year, isbn, available_copies, date_added)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        (title,author_id,genre,publish_year,available_copies,date_added)
+        VALUES (%s,%s,%s,%s,%s,%s)
     """, (
-        data["title"],
-        data["author_id"],
-        data["genre"],
-        data["publish_year"],
-        data["isbn"],
-        data["available_copies"],
-        datetime.date.today()
+        request.form["title"], request.form["author_id"], request.form["genre"],
+        request.form["publish_year"], request.form["available_copies"], datetime.date.today()
     ))
-    db.commit()
-    return jsonify({"message": "Book added"}), 201
+    db.commit(); db.close()
+    return "<h3>Book Added</h3><a href='/books'>Back</a>"
 
 
-@app.route("/api/authors", methods=["POST"])
+@app.route("/books/edit/<int:id>", methods=["GET", "POST"])
 @token_required
-def add_author():
-    data = request.get_json()
-    cursor.execute(
-        "INSERT INTO authors (first_name, last_name) VALUES (%s, %s)",
-        (data["first_name"], data["last_name"])
-    )
-    db.commit()
-    return jsonify({"message": "Author added"}), 201
+def edit_book(id):
+    db = get_db(); cur = db.cursor(dictionary=True)
 
+    if request.method == "GET":
+        cur.execute("SELECT * FROM books WHERE book_id=%s", (id,))
+        book = cur.fetchone(); db.close()
+        return f"""
+        <h2>Edit Book</h2>
+        <form method="POST">
+            <input name="title" value="{book['title']}"><br><br>
+            <input name="genre" value="{book['genre']}"><br><br>
+            <input name="available_copies" value="{book['available_copies']}"><br><br>
+            <button>Update</button>
+        </form>"""
 
-
-@app.route("/api/books/<int:id>", methods=["PUT"])
-@token_required
-def update_book(id):
-    data = request.get_json()
-    cursor.execute("""
-        UPDATE books
-        SET title=%s, author_id=%s, genre=%s, available_copies=%s
+    cur.execute("""
+        UPDATE books SET title=%s, genre=%s, available_copies=%s
         WHERE book_id=%s
     """, (
-        data["title"],
-        data["author_id"],
-        data["genre"],
-        data["available_copies"],
-        id
+        request.form["title"], request.form["genre"], request.form["available_copies"], id
     ))
-    db.commit()
-    return jsonify({"message": "Book updated"})
+    db.commit(); db.close()
+    return "<h3>Updated</h3><a href='/books'>Back</a>"
 
-
-
-@app.route("/api/books/<int:id>", methods=["DELETE"])
+@app.route("/books/delete/<int:id>")
 @token_required
 def delete_book(id):
-    cursor.execute("DELETE FROM books WHERE book_id=%s", (id,))
-    db.commit()
-    return jsonify({"message": "Book deleted"})
+    db = get_db(); cur = db.cursor()
+    cur.execute("DELETE FROM books WHERE book_id=%s", (id,))
+    db.commit(); db.close()
+    return "<h3>Deleted</h3><a href='/books'>Back</a>"
 
 # ==================================================
-# WEB (HTML)
+# HOME + RUN
 # ==================================================
 @app.route("/")
 def index():
     return """
-    <h2>Library API Running (MySQL)</h2>
-    <a href="/login">Login</a><br><br>
-    <a href="/register">Register</a>
-    """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Library API</title>
+    <style>
+        body {
+            margin: 0;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f0f0f, #1a1a1a);
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            background: #161616;
+            border-radius: 16px;
+            padding: 40px 50px;
+            width: 420px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.7);
+            text-align: center;
+        }
+
+        h1 {
+            margin-bottom: 10px;
+            font-size: 28px;
+            color: #ffffff;
+        }
+
+        .subtitle {
+            font-size: 14px;
+            color: #aaaaaa;
+            margin-bottom: 30px;
+        }
+
+        .btn {
+            display: block;
+            text-decoration: none;
+            padding: 14px;
+            margin-bottom: 15px;
+            border-radius: 12px;
+            font-weight: 600;
+            transition: 0.2s ease;
+        }
+
+        .btn-primary {
+            background: #ff4d8d;
+            color: #ffffff;
+        }
+
+        .btn-primary:hover {
+            background: #e13c77;
+            transform: translateY(-2px);
+        }
+
+        .btn-secondary {
+            background: #1f1f1f;
+            color: #dddddd;
+            border: 1px solid #2f2f2f;
+        }
+
+        .btn-secondary:hover {
+            background: #2a2a2a;
+            color: #ffffff;
+        }
+
+        .footer {
+            margin-top: 25px;
+            font-size: 12px;
+            color: #777777;
+        }
+
+        .badge {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            background: rgba(255,77,141,0.15);
+            color: #ff4d8d;
+            font-size: 12px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>📚 Library API</h1>
+        <div class="subtitle">
+            JSON & XML · JWT Auth · Flask · MySQL
+        </div>
+
+        <span class="badge">Dark Mode Enabled</span>
+
+        <br><br>
+
+        <a href="/login" class="btn btn-primary">🔐 Login</a>
+        <a href="/register" class="btn btn-secondary">📝 Register</a>
+
+        <div class="footer">
+            Secure REST API with browser CRUD support
+        </div>
+    </div>
+</body>
+</html>
+"""
 
 
-
-@app.route("/login", methods=["GET", "POST"])
-def login_page():
-    if request.method == "GET":
-        return """
-        <h1>Login</h1>
-        <form method="POST">
-        <input name="username" required>
-        <input name="password" type="password" required>
-        <button>Login</button>
-        </form>
-        """
-
-    cursor.execute("SELECT * FROM users WHERE username=%s",
-                   (request.form["username"],))
-    user = cursor.fetchone()
-
-    if not user or not bcrypt.check_password_hash(
-            user["password"], request.form["password"]):
-        return "<h3>Invalid credentials</h3>"
-
-    token = jwt.encode(
-        {
-            "user": request.form["username"],
-            "exp": datetime.datetime.utcnow()
-                   + datetime.timedelta(hours=2)
-        },
-        app.config["SECRET_KEY"],
-        algorithm="HS256"
-    )
-
-    return f"""
-    <h2>Login Success</h2>
-    <textarea rows=6 cols=80>{token}</textarea>
-    <br><a href="/books">View Books</a>
-    """
-
-
-@app.route("/books")
-def books_page():
-    cursor.execute("SELECT * FROM books")
-    books = cursor.fetchall()
-
-    html = """
-    <h1>Library Books</h1>
-    {% for b in books %}
-    <pre>
-ID: {{b.book_id}}
-Title: {{b.title}}
-Author: {{b.author}}
-Genre: {{b.genre}}
-Year: {{b.publish_year}}
-    </pre>
-    {% endfor %}
-    """
-    return render_template_string(html, books=books)
-
-# ==================================================
-# RUN
-# ==================================================
 if __name__ == "__main__":
-    seed_books()
+    init_db()
     app.run(debug=True)
